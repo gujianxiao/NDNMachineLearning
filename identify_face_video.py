@@ -10,12 +10,23 @@ import detect_face
 import os
 import time
 import pickle
+import argparse
+import asyncio
+import logging
+from pyndn import Face, Name, Data, Interest
+from pyndn.security import KeyChain
+from pyndn.encoding import ProtobufTlv
+from asyncndn import fetch_data_packet
+from asyncndn import fetch_segmented_data
+from command.repo_command_parameter_pb2 import RepoCommandParameterMessage
+from command.repo_command_response_pb2 import RepoCommandResponseMessage
 
 input_video="akshay_mov.mp4"
 modeldir = './model/20170511-185253.pb'
 classifier_filename = './class/classifier.pkl'
 npy='./npy'
 train_img="./train_img"
+video_stream_name='/local_manager/building_1/camera_1/'
 
 with tf.Graph().as_default():
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.6)
@@ -45,91 +56,157 @@ with tf.Graph().as_default():
 
         classifier_filename_exp = os.path.expanduser(classifier_filename)
         with open(classifier_filename_exp, 'rb') as infile:
-            (model, class_names) = pickle.load(infile)
+            (model, class_names) = pickle.load(infile,encoding='iso-8859-1')
 
         video_capture = cv2.VideoCapture(0)
         c = 0
-
+        # initialized the face of NFD
+        face = Face()
+        keychain = KeyChain()
+        face.setCommandSigningInfo(keychain, keychain.getDefaultCertificateName())
+        name = Name(video_stream_name)
 
         print('Start Recognition')
         prevTime = 0
+
+
+        def after_fetched(data: Data):
+            nonlocal recv_window, b_array, seq_to_bytes_unordered
+            """
+            Reassemble data packets in sequence.
+            """
+            if not isinstance(data, Data):
+                return
+            try:
+                seq = int(str(data.getName()).split('/')[-1])
+                print('seq: {}'.format(seq))
+            except ValueError:
+                logging.warning('Sequence number decoding error')
+                return
+
+            # Temporarily store out-of-order packets
+            if seq <= recv_window:
+                return
+            elif seq == recv_window + 1:
+                b_array.extend(data.getContent().toBytes())
+                print('saved packet: seq {}'.format(seq))
+                recv_window += 1
+                while recv_window + 1 in seq_to_bytes_unordered:
+                    b_array.extend(seq_to_bytes_unordered[recv_window + 1])
+                    seq_to_bytes_unordered.pop(recv_window + 1)
+                    print('saved packet: seq {}'.format(recv_window + 1))
+                    recv_window += 1
+            else:
+                logging.info('Received out of order packet: seq {}'.format(seq))
+                seq_to_bytes_unordered[seq] = data.getContent().toBytes()
+
+
         while True:
-            ret, frame = video_capture.read()
+            # fetch segment data callback
 
-            frame = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)    #resize frame (optional)
+            recv_window = -1
+            b_array = bytearray()
+            seq_to_bytes_unordered = dict()  # Temporarily save out-of-order packets
+            semaphore = asyncio.Semaphore(100)
 
-            curTime = time.time()+1    # calc fps
-            timeF = frame_interval
+            # to request the real-time video from the specific camera
+            # construct Interest name
+            name = Name(video_stream_name)
+            curTime = str(int(time.time()))  # calc fps
+            name.append(curTime)
+            temp_file_name = str(name.getPrefix()) + '.avi'
 
-            if (c % timeF == 0):
-                find_results = []
+            fetch_segmented_data(face, name,
+                                 start_block_id=0, end_block_id=2,
+                                 semaphore=semaphore, after_fetched=after_fetched)
+            with open(temp_file_name, 'wb') as f:
+                f.write(b_array)
 
-                if frame.ndim == 2:
-                    frame = facenet.to_rgb(frame)
-                frame = frame[:, :, 0:3]
-                bounding_boxes, _ = detect_face.detect_face(frame, minsize, pnet, rnet, onet, threshold, factor)
-                nrof_faces = bounding_boxes.shape[0]
-                print('Detected_FaceNum: %d' % nrof_faces)
 
-                if nrof_faces > 0:
-                    det = bounding_boxes[:, 0:4]
-                    img_size = np.asarray(frame.shape)[0:2]
+            video_capture = cv2.VideoCapture(temp_file_name)
 
-                    cropped = []
-                    scaled = []
-                    scaled_reshape = []
-                    bb = np.zeros((nrof_faces,4), dtype=np.int32)
+            print('Start Recognition')
+            prevTime = 0
+            while True:
+                ret, frame = video_capture.read()
 
-                    for i in range(nrof_faces):
-                        emb_array = np.zeros((1, embedding_size))
+                frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)  # resize frame (optional)
 
-                        bb[i][0] = det[i][0]
-                        bb[i][1] = det[i][1]
-                        bb[i][2] = det[i][2]
-                        bb[i][3] = det[i][3]
+                curTime = time.time() + 1  # calc fps
+                timeF = frame_interval
 
-                        # inner exception
-                        if bb[i][0] <= 0 or bb[i][1] <= 0 or bb[i][2] >= len(frame[0]) or bb[i][3] >= len(frame):
-                            print('Face is very close!')
-                            continue
+                if (c % timeF == 0):
+                    find_results = []
 
-                        cropped.append(frame[bb[i][1]:bb[i][3], bb[i][0]:bb[i][2], :])
-                        cropped[i] = facenet.flip(cropped[i], False)
-                        scaled.append(misc.imresize(cropped[i], (image_size, image_size), interp='bilinear'))
-                        scaled[i] = cv2.resize(scaled[i], (input_image_size,input_image_size),
-                                               interpolation=cv2.INTER_CUBIC)
-                        scaled[i] = facenet.prewhiten(scaled[i])
-                        scaled_reshape.append(scaled[i].reshape(-1,input_image_size,input_image_size,3))
-                        feed_dict = {images_placeholder: scaled_reshape[i], phase_train_placeholder: False}
-                        emb_array[0, :] = sess.run(embeddings, feed_dict=feed_dict)
-                        predictions = model.predict_proba(emb_array)
-                        print(predictions)
-                        best_class_indices = np.argmax(predictions, axis=1)
-                        best_class_probabilities = predictions[np.arange(len(best_class_indices)), best_class_indices]
-                        # print("predictions")
-                        print(best_class_indices,' with accuracy ',best_class_probabilities)
+                    if frame.ndim == 2:
+                        frame = facenet.to_rgb(frame)
+                    frame = frame[:, :, 0:3]
+                    bounding_boxes, _ = detect_face.detect_face(frame, minsize, pnet, rnet, onet, threshold, factor)
+                    nrof_faces = bounding_boxes.shape[0]
+                    print('Detected_FaceNum: %d' % nrof_faces)
 
-                        # print(best_class_probabilities)
-                        if best_class_probabilities>0.53:
-                            cv2.rectangle(frame, (bb[i][0], bb[i][1]), (bb[i][2], bb[i][3]), (0, 255, 0), 2)    #boxing face
+                    if nrof_faces > 0:
+                        det = bounding_boxes[:, 0:4]
+                        img_size = np.asarray(frame.shape)[0:2]
 
-                            #plot result idx under box
-                            text_x = bb[i][0]
-                            text_y = bb[i][3] + 20
-                            print('Result Indices: ', best_class_indices[0])
-                            print(HumanNames)
-                            for H_i in HumanNames:
-                                if HumanNames[best_class_indices[0]] == H_i:
-                                    result_names = HumanNames[best_class_indices[0]]
-                                    cv2.putText(frame, result_names, (text_x, text_y), cv2.FONT_HERSHEY_COMPLEX_SMALL,
-                                                1, (0, 0, 255), thickness=1, lineType=2)
-                else:
-                    print('Alignment Failure')
-            # c+=1
-            cv2.imshow('Video', frame)
+                        cropped = []
+                        scaled = []
+                        scaled_reshape = []
+                        bb = np.zeros((nrof_faces, 4), dtype=np.int32)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                        for i in range(nrof_faces):
+                            emb_array = np.zeros((1, embedding_size))
 
-        video_capture.release()
-        cv2.destroyAllWindows()
+                            bb[i][0] = det[i][0]
+                            bb[i][1] = det[i][1]
+                            bb[i][2] = det[i][2]
+                            bb[i][3] = det[i][3]
+
+                            # inner exception
+                            if bb[i][0] <= 0 or bb[i][1] <= 0 or bb[i][2] >= len(frame[0]) or bb[i][3] >= len(frame):
+                                print('Face is very close!')
+                                continue
+
+                            cropped.append(frame[bb[i][1]:bb[i][3], bb[i][0]:bb[i][2], :])
+                            cropped[i] = facenet.flip(cropped[i], False)
+                            scaled.append(misc.imresize(cropped[i], (image_size, image_size), interp='bilinear'))
+                            scaled[i] = cv2.resize(scaled[i], (input_image_size, input_image_size),
+                                                   interpolation=cv2.INTER_CUBIC)
+                            scaled[i] = facenet.prewhiten(scaled[i])
+                            scaled_reshape.append(scaled[i].reshape(-1, input_image_size, input_image_size, 3))
+                            feed_dict = {images_placeholder: scaled_reshape[i], phase_train_placeholder: False}
+                            emb_array[0, :] = sess.run(embeddings, feed_dict=feed_dict)
+                            predictions = model.predict_proba(emb_array)
+                            print(predictions)
+                            best_class_indices = np.argmax(predictions, axis=1)
+                            best_class_probabilities = predictions[
+                                np.arange(len(best_class_indices)), best_class_indices]
+                            # print("predictions")
+                            print(best_class_indices, ' with accuracy ', best_class_probabilities)
+
+                            # print(best_class_probabilities)
+                            if best_class_probabilities > 0.53:
+                                cv2.rectangle(frame, (bb[i][0], bb[i][1]), (bb[i][2], bb[i][3]), (0, 255, 0),
+                                              2)  # boxing face
+
+                                # plot result idx under box
+                                text_x = bb[i][0]
+                                text_y = bb[i][3] + 20
+                                print('Result Indices: ', best_class_indices[0])
+                                print(HumanNames)
+                                for H_i in HumanNames:
+                                    if HumanNames[best_class_indices[0]] == H_i:
+                                        result_names = HumanNames[best_class_indices[0]]
+                                        cv2.putText(frame, result_names, (text_x, text_y),
+                                                    cv2.FONT_HERSHEY_COMPLEX_SMALL,
+                                                    1, (0, 0, 255), thickness=1, lineType=2)
+                    else:
+                        print('Alignment Failure')
+                # c+=1
+                cv2.imshow('Video', frame)
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+            video_capture.release()
+            cv2.destroyAllWindows()
