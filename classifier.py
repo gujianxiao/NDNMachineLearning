@@ -15,10 +15,12 @@ class training:
         self.datadir = datadir
         self.modeldir = modeldir
         self.classifier_filename = classifier_filename
+        self.model_file='saved_model'
 
     def main_train(self):
         with tf.Graph().as_default():
             with tf.Session() as sess:
+                if os._exists()
                 img_data = facenet.get_dataset(self.datadir)
                 path, label = facenet.get_image_paths_and_labels(img_data)
                 print('Classes: %d' % len(img_data))

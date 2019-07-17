@@ -12,17 +12,20 @@ async def fetch_data_packet(face: Face, interest: Interest) -> Union[Data, Netwo
     def on_data(_interest, data: Data):
         nonlocal done, result
         logging.info('on data')
+        print('on data')
         result = data
         done.set()
 
     def on_timeout(_interest):
         nonlocal done
         logging.info('timeout')
+        print('on timeout')
         done.set()
 
     def on_network_nack(_interest, network_nack: NetworkNack):
         nonlocal done, result
         logging.info('nack')
+        print('on nack')
         result = network_nack
         done.set()
 
@@ -51,7 +54,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
     Upon receiving each data, call after_fetched upon().
     TODO: Remove hard-coded part
     """
-    FETCHER_RETRY_INTERVAL = 1
+    FETCHER_RETRY_INTERVAL = 0
     FETCHER_MAX_ATTEMPT_NUMBER = 3
     FETCHER_FAIL_EXIT_THRESHOLD = 5
 
@@ -62,6 +65,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
         nonlocal n_success, n_fail, cur_id, final_id
 
         logging.info('retry_or_fail(): {}'.format(interest.getName()))
+        print('retry_or_fail(): {}'.format(interest.getName()))
 
         for _ in range(FETCHER_MAX_ATTEMPT_NUMBER):
             response = await fetch_data_packet(face, interest)
@@ -99,7 +103,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
         # number of tasks would be added
         await semaphore.acquire()
         interest = Interest(Name(prefix).append(str(cur_id)))
-        interest.setInterestLifetimeMilliseconds(1000)
+        interest.setInterestLifetimeMilliseconds(500)
         tasks.append(event_loop.create_task(retry_or_fail(interest)))
         cur_id += 1
 
