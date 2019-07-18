@@ -107,9 +107,10 @@ venv.bak/
 # ProtoBuf generated files
 *_pb2.py
 
-# PyCharm
+# Editors
 .idea/
 **/.DS_Store
+.vscode/
 
 # Videos produced
 *.avi
