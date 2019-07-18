@@ -89,9 +89,8 @@ async def main():
                     return
                 try:
                     seq = int(str(data.getName()).split('/')[-1])
-                    print('seq: {}'.format(seq))
                 except ValueError:
-                    logging.warning('Sequence nufetch_segmented_datamber decoding error')
+                    logging.warning('Sequence number decoding error')
                     return
 
                 # Temporarily store out-of-order packets
@@ -99,12 +98,12 @@ async def main():
                     return
                 elif seq == recv_window + 1:
                     b_array.extend(data.getContent().toBytes())
-                    print('saved packet: seq {}'.format(seq))
+                    logging.warning('saved packet: seq {}'.format(seq))
                     recv_window += 1
                     while recv_window + 1 in seq_to_bytes_unordered:
                         b_array.extend(seq_to_bytes_unordered[recv_window + 1])
                         seq_to_bytes_unordered.pop(recv_window + 1)
-                        print('saved packet: seq {}'.format(recv_window + 1))
+                        logging.warning('saved packet: seq {}'.format(recv_window + 1))
                         recv_window += 1
                 else:
                     logging.info('Received out of order packet: seq {}'.format(seq))
@@ -117,7 +116,7 @@ async def main():
                 recv_window = -1
                 b_array = bytearray()
                 seq_to_bytes_unordered = dict()  # Temporarily save out-of-order packets
-                semaphore = asyncio.Semaphore(5)
+                semaphore = asyncio.Semaphore(100)
 
                 # to request the real-time video from the specific camera
                 # construct Interest name
@@ -126,17 +125,15 @@ async def main():
                 name.append(curTime)
                 temp_file_name = str(name[-1]) + '.avi'
 
-                print('Fetching')
                 await fetch_segmented_data(face, name,
                                            start_block_id=0, end_block_id=None,
                                            semaphore=semaphore, after_fetched=after_fetched)
-                print('Fetched')
 
                 if len(b_array) == 0:
                     print('no data back')
                     continue
                 else:
-                    print('fetch {}    bytes of data'.format(len(b_array)))
+                    print('fetched {} bytes of data'.format(len(b_array)))
                 with open(os.path.join('result', temp_file_name), 'wb') as f:
                     f.write(b_array)
 
@@ -236,7 +233,7 @@ async def main():
 if __name__ == '__main__':
     logging.basicConfig(format='[%(asctime)s]%(levelname)s:%(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S',
-                        level=logging.INFO)
+                        level=logging.WARNING)
 
     event_loop = asyncio.get_event_loop()
     event_loop.run_until_complete(main())

@@ -6,38 +6,30 @@ from pyndn import Face, Interest, NetworkNack, Data, Name
 
 
 async def fetch_data_packet(face: Face, interest: Interest) -> Union[Data, NetworkNack, None]:
-    done = threading.Event()
+    done = asyncio.Event()
     result = None
 
     def on_data(_interest, data: Data):
         nonlocal done, result
         logging.info('on data')
-        print('on data')
         result = data
         done.set()
 
     def on_timeout(_interest):
         nonlocal done
         logging.info('timeout')
-        print('on timeout')
         done.set()
 
     def on_network_nack(_interest, network_nack: NetworkNack):
         nonlocal done, result
         logging.info('nack')
-        print('on nack')
+        print('nack')
         result = network_nack
         done.set()
 
-    async def wait_for_event():
-        ret = False
-        while not ret:
-            ret = done.wait(0.01)
-            await asyncio.sleep(0.01)
-
     try:
         face.expressInterest(interest, on_data, on_timeout, on_network_nack)
-        await wait_for_event()
+        await done.wait()
         return result
     except (ConnectionRefusedError, BrokenPipeError) as error:
         return error
@@ -64,6 +56,11 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
         """
         nonlocal n_success, n_fail, cur_id, final_id
 
+        seq = int(str(interest.getName()[-1]))
+        if seq > final_id:
+            semaphore.release()
+            return
+
         logging.info('retry_or_fail(): {}'.format(interest.getName()))
         print('retry_or_fail(): {}'.format(interest.getName()))
 
@@ -74,7 +71,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
                 final_id_component = response.metaInfo.getFinalBlockId()
                 if final_id_component.isSegment():
                     final_id = final_id_component.toSegment()
-                    print('final_id is set to {}'.format(final_id))
+                    logging.info('final_id is set to {}'.format(final_id))
                 success = True
                 break
             else:
@@ -90,6 +87,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
         semaphore.release()
         after_fetched(response)
 
+    print('Fetching: {}'.format(prefix))
     cur_id = (start_block_id if start_block_id else 0)
     final_id = (end_block_id if (end_block_id is not None) else 0x7fffffff)
     n_success = 0

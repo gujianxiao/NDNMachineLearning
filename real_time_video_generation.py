@@ -38,7 +38,7 @@ def prepare_data(filePath, keychain: KeyChain):
         return
 
     n_packets = int((len(b_array) - 1) / MAX_BYTES_IN_DATA_PACKET + 1)
-    print('There are {} packets in total'.format(n_packets))
+    print('There are {} packets'.format(n_packets))
     seq = 0
     for i in range(0, len(b_array), MAX_BYTES_IN_DATA_PACKET):
         data = Data(Name(VIDEO_STREAM_NAME).append(filePath.split('.')[0]).append(str(seq)))
@@ -75,35 +75,40 @@ def remove_outdated_data(cur_time: int):
     """
     Evict outdated packets from memory and disk.
     """
-    if VIDEO_STREAM_NAME + str(cur_time - 10) in dict1:
-        dict1.pop(VIDEO_STREAM_NAME + str(cur_time - 10))
-        logging.info('Remove data packet: {}'.format(cur_time - 10))
+    window = 20
+    if VIDEO_STREAM_NAME + str(cur_time - window) in dict1:
+        dict1.pop(VIDEO_STREAM_NAME + str(cur_time - window))
+        logging.info('Remove data packet: {}'.format(cur_time - window))
     
-    if os.path.exists(str(cur_time - 10) + '.avi'):
-        os.remove(str(cur_time - 10) + '.avi')
-        logging.info('Removed file: {}'.format(cur_time - 10))
+    if os.path.exists(str(cur_time - window) + '.avi'):
+        os.remove(str(cur_time - window) + '.avi')
+        logging.info('Removed file: {}'.format(cur_time - window))
 
 
-async def capture_video_chunk(duration: int, cap, fourcc) -> str:
+async def capture_video_chunk(duration: int, cap) -> str:
     """
     Capture a video chunk of given duration, then save to disk.
     Return the timestamp of the captured video.
     """
     cur_time = int(time.time()) + duration
+    filename = str(cur_time) + '.avi'
 
     if _platform == "linux" or _platform == "linux2":
-        filename = str(cur_time) + '.avi'
-        out = cv2.VideoWriter(filename, fourcc, 25, (640, 480))
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        fps = 25
     elif _platform == "darwin":
-        frame_width = int(cap.get(3))
-        frame_height = int(cap.get(4))
-        print("W, H: {}, {}".format(frame_width, frame_height))
-        out = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc('M','J','P','G'), 10, 
-                            (frame_width, frame_height))
+        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
+        fps = 10
+    out = cv2.VideoWriter(filename, fourcc, 10, (640, 480))
     
     while int(time.time()) < cur_time:
         await asyncio.sleep(0)
         ret, frame = cap.read()
+
+        # Resize to 640 * 480
+        if _platform == "darwin":
+            frame = cv2.resize(frame, (640, 480), fx=0,fy=0, interpolation=cv2.INTER_CUBIC)
+
         out.write(frame)
         cv2.imshow('frame', frame)
         
@@ -135,11 +140,10 @@ async def main():
     print('Registered filter ID {}'.format(filter_id))
 
     cap = cv2.VideoCapture(0)
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
     # Capture a video every second
     while True:
-        cur_time = await capture_video_chunk(duration=1, cap=cap, fourcc=fourcc)
+        cur_time = await capture_video_chunk(duration=1, cap=cap)
         prepare_packets(cur_time=cur_time, keychain=keychain)
         remove_outdated_data(cur_time)
 
