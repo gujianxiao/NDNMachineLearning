@@ -23,7 +23,6 @@ async def fetch_data_packet(face: Face, interest: Interest) -> Union[Data, Netwo
     def on_network_nack(_interest, network_nack: NetworkNack):
         nonlocal done, result
         logging.info('nack')
-        print('nack')
         result = network_nack
         done.set()
 
@@ -43,7 +42,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
     If start_block_id is not set, start from sequence 0.
     If end_block_id is set, or a data packet returns FinalBlockId, the function will fetch all data
     until that id. Otherwise, it will return until number of failures reach a threshold.
-    Upon receiving each data, call after_fetched upon().
+    Upon receiving each data, call after_fetched.
     TODO: Remove hard-coded part
     """
     FETCHER_RETRY_INTERVAL = 0
@@ -62,7 +61,7 @@ async def fetch_segmented_data(face: Face, prefix: Name, start_block_id: Optiona
             return
 
         logging.info('retry_or_fail(): {}'.format(interest.getName()))
-        print('retry_or_fail(): {}'.format(interest.getName()))
+        # print('retry_or_fail(): {}'.format(interest.getName()))
 
         for _ in range(FETCHER_MAX_ATTEMPT_NUMBER):
             response = await fetch_data_packet(face, interest)

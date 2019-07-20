@@ -13,6 +13,9 @@ import pickle
 import argparse
 import asyncio
 import logging
+import skimage
+from queue import Queue
+from threading import Thread
 from pyndn import Face, Name, Data, Interest
 from pyndn.security import KeyChain
 from pyndn.encoding import ProtobufTlv
@@ -25,27 +28,111 @@ modeldir = './model/20170511-185253.pb'
 classifier_filename = './class/classifier.pkl'
 npy='./npy'
 train_img="./train_img"
-video_stream_name='/local_manager/building_1/camera_1/video'
+VIDEO_STREAM_NAME='/local_manager/building_1/camera_1/video'
+model = None
 
 
-async def main():
+
+async def fetch_video_bytechunk(face: Face, cur_time: int):
+    """
+    Fetch a video chunk named cur_time
+    """
+    def after_fetched(data: Data):
+        nonlocal recv_window, b_array, seq_to_bytes_unordered
+        if not isinstance(data, Data):
+            return
+        try:
+            seq = int(str(data.getName()).split('/')[-1])
+        except ValueError:
+            logging.warning('Sequence number decoding error')
+            return
+        
+        # Temporarily store out-of-order packets
+        if seq <= recv_window:
+            return
+        elif seq == recv_window + 1:
+            b_array.extend(data.getContent().toBytes())
+            # logging.warning('saved packet: seq {}'.format(seq))
+            recv_window += 1
+            while recv_window + 1 in seq_to_bytes_unordered:
+                b_array.extend(seq_to_bytes_unordered[recv_window + 1])
+                seq_to_bytes_unordered.pop(recv_window + 1)
+                # logging.warning('saved packet: seq {}'.format(recv_window + 1))
+                recv_window += 1
+        else:
+            logging.info('Received out of order packet: seq {}'.format(seq))
+            seq_to_bytes_unordered[seq] = data.getContent().toBytes()
+
+    recv_window = -1
+    b_array = bytearray()
+    seq_to_bytes_unordered = dict()  # Temporarily save out-of-order packets
+    semaphore = asyncio.Semaphore(100)
+    name = Name(VIDEO_STREAM_NAME)
+    name.append(str(cur_time))
+    
+    await fetch_segmented_data(face, name,
+                               start_block_id=0, end_block_id=None,
+                               semaphore=semaphore, after_fetched=after_fetched)
+    
+    if len(b_array) == 0:
+        print('no data back')
+    else:
+        print('fetched video {}, {} bytes'.format(str(cur_time), len(b_array)))
+    
+    return b_array
+
+
+async def fetch_videos_periodically(q: Queue):
 
     async def face_loop():
         nonlocal face, running
         while running:
             face.processEvents()
             await asyncio.sleep(0.001)
+
     face = Face()
     running = True
+    event_loop = asyncio.get_event_loop()
     face_event = event_loop.create_task(face_loop())
 
+    # initialized the face of NFD
+    keychain = KeyChain()
+    face.setCommandSigningInfo(keychain, keychain.getDefaultCertificateName())
+    name = Name(VIDEO_STREAM_NAME)
+
+    ahead_seconds = 0
+    cur_time = None
+    while True:
+        # Do not fetch the same video chunk multiple times
+        while cur_time is not None and int(time.time()) - ahead_seconds == cur_time:
+            await asyncio.sleep(0.01)
+        
+        # Fetch video chunks with some delay
+        cur_time = int(time.time()) - ahead_seconds
+        b_array = await fetch_video_bytechunk(face, cur_time)
+
+        if len(b_array) == 0:
+            continue
+        
+        file_name = str(cur_time) + '.avi'
+        file_path = os.path.join('result', file_name)
+        with open(file_path, 'wb') as f:
+            f.write(b_array)
+        
+        q.put(file_name)
+
+    running = False
+    await face_event
+
+
+def identify_face(q: Queue):
 
     with tf.Graph().as_default():
         gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.6)
         sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options, log_device_placement=False))
         with sess.as_default():
             pnet, rnet, onet = detect_face.create_mtcnn(sess, npy)
-
+        
             minsize = 20  # minimum size of face
             threshold = [0.6, 0.7, 0.7]  # three steps's threshold
             factor = 0.709  # scale factor
@@ -58,7 +145,7 @@ async def main():
             HumanNames = os.listdir(train_img)
             HumanNames.sort()
 
-            print('Loading Modal')
+            print('Loading Model')
             facenet.load_model(modeldir)
             images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
             embeddings = tf.get_default_graph().get_tensor_by_name("embeddings:0")
@@ -69,85 +156,26 @@ async def main():
             classifier_filename_exp = os.path.expanduser(classifier_filename)
             with open(classifier_filename_exp, 'rb') as infile:
                 (model, class_names) = pickle.load(infile,encoding='iso-8859-1')
-
+            print('Loaded model')
+            
             c = 0
-            # initialized the face of NFD
-            keychain = KeyChain()
-            face.setCommandSigningInfo(keychain, keychain.getDefaultCertificateName())
-            name = Name(video_stream_name)
-
-            print('Start Recognition')
-            prevTime = 0
-
-
-            def after_fetched(data: Data):
-                nonlocal recv_window, b_array, seq_to_bytes_unordered
-                """
-                Reassemble data packets in sequence.
-                """
-                if not isinstance(data, Data):
-                    return
-                try:
-                    seq = int(str(data.getName()).split('/')[-1])
-                except ValueError:
-                    logging.warning('Sequence number decoding error')
-                    return
-
-                # Temporarily store out-of-order packets
-                if seq <= recv_window:
-                    return
-                elif seq == recv_window + 1:
-                    b_array.extend(data.getContent().toBytes())
-                    logging.warning('saved packet: seq {}'.format(seq))
-                    recv_window += 1
-                    while recv_window + 1 in seq_to_bytes_unordered:
-                        b_array.extend(seq_to_bytes_unordered[recv_window + 1])
-                        seq_to_bytes_unordered.pop(recv_window + 1)
-                        logging.warning('saved packet: seq {}'.format(recv_window + 1))
-                        recv_window += 1
-                else:
-                    logging.info('Received out of order packet: seq {}'.format(seq))
-                    seq_to_bytes_unordered[seq] = data.getContent().toBytes()
-
-
             while True:
-                # fetch segment data callback
-
-                recv_window = -1
-                b_array = bytearray()
-                seq_to_bytes_unordered = dict()  # Temporarily save out-of-order packets
-                semaphore = asyncio.Semaphore(100)
-
-                # to request the real-time video from the specific camera
-                # construct Interest name
-                name = Name(video_stream_name)
-                curTime = str(int(time.time()) - 2)  # calc fps
-                name.append(curTime)
-                temp_file_name = str(name[-1]) + '.avi'
-
-                await fetch_segmented_data(face, name,
-                                           start_block_id=0, end_block_id=None,
-                                           semaphore=semaphore, after_fetched=after_fetched)
-
-                if len(b_array) == 0:
-                    print('no data back')
+                while q.empty():
+                    time.sleep(0.01)
                     continue
-                else:
-                    print('fetched {} bytes of data'.format(len(b_array)))
-                with open(os.path.join('result', temp_file_name), 'wb') as f:
-                    f.write(b_array)
+                file_name = q.get()
+                file_path = os.path.join('result', file_name)
+                video_capture = cv2.VideoCapture(file_path)
 
-
-                video_capture = cv2.VideoCapture(os.path.join('result', temp_file_name))
-
-                print('Start Recognition')
-                prevTime = 0
-                while True:
+                print('Start recognition on: {}'.format(file_name))
+                
+                while video_capture.isOpened():
                     ret, frame = video_capture.read()
+                    if not ret:
+                        break
 
                     frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)  # resize frame (optional)
 
-                    curTime = time.time() + 1  # calc fps
                     timeF = frame_interval
 
                     if (c % timeF == 0):
@@ -217,17 +245,24 @@ async def main():
                                                         1, (0, 0, 255), thickness=1, lineType=2)
                         else:
                             print('Alignment Failure')
-                    # c+=1
+                    c+=1
                     cv2.imshow('Video_2', frame)
 
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
 
                 video_capture.release()
-                cv2.destroyAllWindows()
+                # cv2.destroyAllWindows()
 
-    running = False
-    await face_event
+                q.task_done()
+            cv2.destroyAllWindows()
+
+
+def fetch_videos_worker(q: Queue):
+    print('fetch_videos_worker() started')
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    event_loop = asyncio.get_event_loop()
+    event_loop.run_until_complete(fetch_videos_periodically(q))
 
 
 if __name__ == '__main__':
@@ -235,6 +270,18 @@ if __name__ == '__main__':
                         datefmt='%Y-%m-%d %H:%M:%S',
                         level=logging.WARNING)
 
-    event_loop = asyncio.get_event_loop()
-    event_loop.run_until_complete(main())
+    # Use a queue containing filenames for inter-thread communication
+    q = Queue(maxsize=0)
 
+    # identify_face_thread = Thread(target=identify_face, args=(q,))
+    # identify_face_thread.start()
+
+    # event_loop = asyncio.get_event_loop()
+    # event_loop.run_until_complete(fetch_videos_periodically(q))
+
+    fetch_videos_thread = Thread(target=fetch_videos_worker, args=(q,))
+    fetch_videos_thread.start()
+
+    identify_face(q)
+
+    q.join()
