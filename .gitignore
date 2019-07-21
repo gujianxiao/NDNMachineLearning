@@ -115,3 +115,6 @@ venv.bak/
 # Videos produced
 *.avi
 result/*
+
+# Protobuf outputs
+*_pb2.py
