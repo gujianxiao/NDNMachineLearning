@@ -118,3 +118,9 @@ result/*
 
 # Protobuf outputs
 *_pb2.py
+
+# ML
+log/
+model/
+Variable
+feat-data/

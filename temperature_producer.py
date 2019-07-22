@@ -65,11 +65,6 @@ class TemperatureProducer(object):
             except RuntimeError as exc:
                 logging.warning('Response decoding failed', exc)
 
-        # Keep face running for a while for data to be served
-        await asyncio.sleep(30)
-        self.running = False
-        await face_task
-
     async def face_loop(self):
         while self.running:
             self.face.processEvents()
