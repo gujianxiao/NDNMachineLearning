@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import logging
 import random
@@ -10,6 +11,7 @@ from asyncndn import fetch_data_packet
 from command.repo_command_parameter_pb2 import RepoCommandParameterMessage
 from command.repo_command_response_pb2 import RepoCommandResponseMessage
 
+use_repo = False
 
 class TemperatureProducer(object):
     """
@@ -31,8 +33,6 @@ class TemperatureProducer(object):
         event_loop = asyncio.get_event_loop()
         event_loop.create_task(self.face_loop())
 
-        event_loop.create_task(self.send_cmd_interest())
-
     async def send_cmd_interest(self):
         event_loop = asyncio.get_event_loop()
         face_task = event_loop.create_task(self.face_loop())
@@ -41,7 +41,7 @@ class TemperatureProducer(object):
         for compo in self.prefix:
             parameter.repo_command_parameter.name.component.append(compo.getValue().toBytes())
         parameter.repo_command_parameter.start_block_id = int(time.time())
-        parameter.repo_command_parameter.end_block_id = 0x7fffffff
+        parameter.repo_command_parameter.end_block_id = parameter.repo_command_parameter.start_block_id
         param_blob = ProtobufTlv.encode(parameter)
 
         # Prepare cmd interest
@@ -86,7 +86,11 @@ class TemperatureProducer(object):
 
         self.keychain.sign(data)
         self.name_str_to_data[str(data.getName())] = data
-    
+        if use_repo is True:
+            event_loop = asyncio.get_event_loop()
+            event_loop.create_task(self.send_cmd_interest())
+            logging.info("send repo insertion command")
+
     def on_interest(self, _prefix, interest: Interest, face, _filter_id, _filter):
         name = str(interest.getName())
         if name in self.name_str_to_data:
@@ -104,6 +108,13 @@ class TemperatureProducer(object):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='segmented insert client')
+    parser.add_argument('-r', '--repo_enable', help='when with this option, Repo will be used.', action='store_true')
+    args = parser.parse_args()
+    if args.repo_enable:
+        global use_repo
+        use_repo = True
+
     prefix = Name('/home')
     sensor = TemperatureProducer(prefix, Name('testrepo'))
 
