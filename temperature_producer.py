@@ -28,10 +28,12 @@ class TemperatureProducer(object):
         self.face.setCommandSigningInfo(self.keychain, self.keychain.getDefaultCertificateName())
         self.face.registerPrefix(self.prefix, None,
                                  lambda prefix: logging.error("Prefix registration failed: %s", prefix))
-        self.face.setInterestFilter(self.prefix, self.on_interest)
+        self.filter_id = self.face.setInterestFilter(self.prefix, self.on_interest)
 
         event_loop = asyncio.get_event_loop()
         event_loop.create_task(self.face_loop())
+
+        self.latest_tp = 0
 
     async def send_cmd_interest(self):
         event_loop = asyncio.get_event_loop()
@@ -40,7 +42,7 @@ class TemperatureProducer(object):
         parameter = RepoCommandParameterMessage()
         for compo in self.prefix:
             parameter.repo_command_parameter.name.component.append(compo.getValue().toBytes())
-        parameter.repo_command_parameter.start_block_id = int(time.time())
+        parameter.repo_command_parameter.start_block_id = self.latest_tp
         parameter.repo_command_parameter.end_block_id = parameter.repo_command_parameter.start_block_id
         param_blob = ProtobufTlv.encode(parameter)
 
@@ -74,7 +76,10 @@ class TemperatureProducer(object):
         return random.randint(0, 35)
 
     def publish_temp_packet(self):
-        data_name = Name(self.prefix).append(str(int(time.time())))
+        tp = int(time.time())
+        tp = tp - (tp % 5)
+        self.latest_tp = tp
+        data_name = Name(self.prefix).append(str(self.latest_tp))
         data = Data(data_name)
 
         temp = self.get_temp()
@@ -99,12 +104,15 @@ class TemperatureProducer(object):
 
     async def run(self):
         """
-        Need to publish data with period of at least 1 second, otherwise Data
+        Need to publish data with period of at least 5 second, otherwise Data
         packets are not immutable
         """
         while self.running:
             self.publish_temp_packet()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
+            self.face.unsetInterestFilter(self.filter_id)
+            await asyncio.sleep(4.5)
+            self.filter_id = self.face.setInterestFilter(self.prefix, self.on_interest)
 
 
 def main():
