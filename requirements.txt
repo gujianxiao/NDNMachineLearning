@@ -27,7 +27,7 @@ networkx==2.3
 numpy==1.16.4
 pandas==0.25.0
 Pillow==6.1.0
-protobuf==3.9.0
+protobuf==3.18.3
 pycparser==2.19
 pylint==2.3.1
 PyNDN==2.10b1
